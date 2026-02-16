@@ -173,6 +173,18 @@ Wait for the next scheduled execution (up to 5 minutes). The following will happ
 
 To test the EventBridge Scheduler DLQ flow, you would need to create an invocation failure (e.g., remove Lambda invoke permission temporarily). This is not recommended for production testing but demonstrates the dual DLQ architecture.
 
+If you do test this scenario, the following will happen:
+
+1. ⏰ EventBridge Scheduler attempts to invoke Lambda
+2. ❌ Invocation fails (e.g., permission denied)
+3. 🔄 EventBridge Scheduler retries 3 times (each attempt fails)
+4. 📬 After 3 failed retries, event is sent to EventBridge Scheduler DLQ (encrypted)
+5. ⚡ SQS triggers the EventBridge DLQ Processor via Event Source Mapping
+6. 📧 EventBridge DLQ Processor decrypts message and sends SNS notification
+7. ✉️ You receive an email with subject "🚨 EventBridge Scheduler Execution Failure Alert"
+
+**Check your email** for the invocation failure notification!
+
 ### Test 4: View DLQ Processor Logs
 
 ```bash
