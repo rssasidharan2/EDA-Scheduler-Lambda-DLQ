@@ -1,0 +1,75 @@
+{
+  "title": "EventBridge Scheduler with Lambda, Dual DLQ, and SNS Notifications",
+  "description": "Scheduled Lambda execution with comprehensive failure handling using dual dead letter queues for both invocation and execution failures, KMS encryption, and SNS email notifications",
+  "language": "Python",
+  "level": "300",
+  "framework": "AWS SAM",
+  "introBox": {
+    "headline": "How it works",
+    "text": [
+      "This pattern demonstrates scheduled Lambda execution using EventBridge Scheduler with comprehensive failure handling through dual dead letter queue (DLQ) architecture.",
+      "EventBridge Scheduler invokes Lambda asynchronously every 5 minutes, with separate DLQs capturing both invocation failures (permission errors, throttling) and execution failures (Lambda exceptions).",
+      "Lambda execution failures are handled by Lambda's async retry mechanism (2 attempts) before being sent to the Lambda Execution DLQ.",
+      "EventBridge Scheduler invocation failures are handled by the scheduler's retry policy (3 attempts) before being sent to the EventBridge Scheduler DLQ.",
+      "Both DLQs are encrypted with a customer-managed KMS key and use Event Source Mapping to trigger dedicated processor Lambda functions.",
+      "Each DLQ processor decrypts messages and sends detailed failure notifications via SNS email, providing complete visibility into both types of failures.",
+      "The pattern implements least privilege IAM permissions with all resources scoped to specific ARNs (no wildcards)."
+    ]
+  },
+  "gitHub": {
+    "template": {
+      "repoURL": "https://github.com/aws-samples/serverless-patterns/tree/main/eventbridge-scheduler-lambda-dlq-sns-sam-python",
+      "templateURL": "serverless-patterns/eventbridge-scheduler-lambda-dlq-sns-sam-python",
+      "projectFolder": "eventbridge-scheduler-lambda-dlq-sns-sam-python",
+      "templateFile": "template.yaml"
+    }
+  },
+  "resources": {
+    "bullets": [
+      {
+        "text": "EventBridge Scheduler Documentation",
+        "link": "https://docs.aws.amazon.com/scheduler/latest/UserGuide/what-is-scheduler.html"
+      },
+      {
+        "text": "Lambda Asynchronous Invocation",
+        "link": "https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html"
+      },
+      {
+        "text": "Lambda Error Handling and Retries",
+        "link": "https://docs.aws.amazon.com/lambda/latest/dg/invocation-retries.html"
+      },
+      {
+        "text": "SQS Dead Letter Queues",
+        "link": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
+      },
+      {
+        "text": "EventBridge Scheduler Retry Policies",
+        "link": "https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-schedule-retry.html"
+      },
+      {
+        "text": "KMS Encryption for SQS",
+        "link": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-server-side-encryption.html"
+      }
+    ]
+  },
+  "deploy": {
+    "text": [
+      "sam deploy --guided",
+      "During deployment, provide your email address for failure notifications",
+      "After deployment, confirm the SNS subscription email to receive notifications"
+    ]
+  },
+  "testing": {
+    "text": ["See the GitHub repo for detailed testing instructions including failure simulation."]
+  },
+  "cleanup": {
+    "text": ["Delete the stack: <code>sam delete</code>."]
+  },
+  "authors": [
+    {
+      "name": "Sasidharan Ramasamy",
+      "bio": "Technical Account Manager @ AWS with over 10 years of industry experience",
+      "linkedin": "https://www.linkedin.com/in/sasidharan-ramasamy/"
+    }
+  ]
+}

@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  EventBridge Scheduler with Lambda, SQS DLQ, and SNS Notifications
+  
+  This pattern demonstrates scheduled Lambda execution with automatic retry, DLQ handling,
+  and SNS notifications for failures. EventBridge Scheduler invokes Lambda on a schedule,
+  failed executions go to SQS DLQ, which triggers a processor Lambda to send SNS alerts.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive failure notifications
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+
+Resources:
+  # KMS Key for SQS DLQ encryption
+  DLQEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EventBridge Scheduler DLQ encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow EventBridge Scheduler to use the key
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/${AWS::StackName}-schedule'
+          - Sid: Allow Lambda to decrypt messages
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - kms:Decrypt
+            Resource: '*'
+
+  DLQEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-dlq-key'
+      TargetKeyId: !Ref DLQEncryptionKey
+
+  # Main Lambda Function (invoked by EventBridge Scheduler)
+  ScheduledFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/scheduled/
+      Handler: app.lambda_handler
+      Description: Main function invoked by EventBridge Scheduler
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          SIMULATE_FAILURE: false
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaExecutionDLQ.Arn
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt LambdaExecutionDLQ.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:GenerateDataKey
+                - kms:Decrypt
+              Resource: !GetAtt DLQEncryptionKey.Arn
+
+  # Dead Letter Queue for Lambda execution failures
+  LambdaExecutionDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-lambda-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !Ref DLQEncryptionKey
+      Tags:
+        - Key: Pattern
+          Value: EventBridge-Scheduler-Lambda-DLQ-SNS
+
+  # Lambda DLQ Processor Function (processes Lambda execution failures)
+  LambdaDLQProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/lambda-dlq-processor/
+      Handler: app.lambda_handler
+      Description: Processes Lambda execution failures from Lambda DLQ and sends SNS notifications
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref FailureNotificationTopic
+          LOG_LEVEL: INFO
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt FailureNotificationTopic.TopicName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt LambdaExecutionDLQ.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource: !GetAtt DLQEncryptionKey.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LambdaExecutionDLQ.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # Dead Letter Queue for failed EventBridge Scheduler invocations
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !Ref DLQEncryptionKey
+      Tags:
+        - Key: Pattern
+          Value: EventBridge-Scheduler-Lambda-DLQ-SNS
+
+  # Queue Policy to allow EventBridge Scheduler to send messages to DLQ
+  DeadLetterQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref DeadLetterQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeSchedulerToSendMessage
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt DeadLetterQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/${AWS::StackName}-schedule'
+
+  # DLQ Processor Lambda Function (triggered by SQS via Event Source Mapping)
+  DLQProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/dlq-processor/
+      Handler: app.lambda_handler
+      Description: Processes failed events from DLQ and sends SNS notifications
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref FailureNotificationTopic
+          LOG_LEVEL: INFO
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt FailureNotificationTopic.TopicName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt DeadLetterQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource: !GetAtt DLQEncryptionKey.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DeadLetterQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # SNS Topic for failure notifications
+  FailureNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-failures'
+      DisplayName: EventBridge Scheduler Failure Notifications
+      Tags:
+        - Key: Pattern
+          Value: EventBridge-Scheduler-Lambda-DLQ-SNS
+
+  # SNS Subscription for email notifications
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref FailureNotificationTopic
+      Endpoint: !Ref NotificationEmail
+
+  # IAM Role for EventBridge Scheduler
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ScheduledFunction.Arn
+        - PolicyName: SendToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DeadLetterQueue.Arn
+        - PolicyName: UseKMSKey
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt DLQEncryptionKey.Arn
+
+  # EventBridge Scheduler
+  EventSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${AWS::StackName}-schedule'
+      Description: Invokes Lambda function every 5 minutes with retry and DLQ
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ScheduledFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 3
+          MaximumEventAgeInSeconds: 3600  # 1 hour
+        DeadLetterConfig:
+          Arn: !GetAtt DeadLetterQueue.Arn
+
+Outputs:
+  ScheduledFunctionArn:
+    Description: ARN of the scheduled Lambda function
+    Value: !GetAtt ScheduledFunction.Arn
+    
+  ScheduledFunctionName:
+    Description: Name of the scheduled Lambda function
+    Value: !Ref ScheduledFunction
+    
+  LambdaExecutionDLQUrl:
+    Description: URL of the Lambda Execution Dead Letter Queue
+    Value: !Ref LambdaExecutionDLQ
+    
+  LambdaExecutionDLQArn:
+    Description: ARN of the Lambda Execution Dead Letter Queue
+    Value: !GetAtt LambdaExecutionDLQ.Arn
+    
+  LambdaDLQProcessorFunctionArn:
+    Description: ARN of the Lambda DLQ processor function
+    Value: !GetAtt LambdaDLQProcessorFunction.Arn
+    
+  LambdaDLQProcessorFunctionName:
+    Description: Name of the Lambda DLQ processor function
+    Value: !Ref LambdaDLQProcessorFunction
+    
+  DLQProcessorFunctionArn:
+    Description: ARN of the EventBridge DLQ processor Lambda function
+    Value: !GetAtt DLQProcessorFunction.Arn
+    
+  DLQProcessorFunctionName:
+    Description: Name of the EventBridge DLQ processor Lambda function
+    Value: !Ref DLQProcessorFunction
+    
+  DeadLetterQueueUrl:
+    Description: URL of the EventBridge Scheduler Dead Letter Queue
+    Value: !Ref DeadLetterQueue
+    
+  DeadLetterQueueArn:
+    Description: ARN of the EventBridge Scheduler Dead Letter Queue
+    Value: !GetAtt DeadLetterQueue.Arn
+    
+  SNSTopicArn:
+    Description: ARN of the SNS topic for failure notifications
+    Value: !Ref FailureNotificationTopic
+    
+  NotificationEmail:
+    Description: Email address subscribed to failure notifications
+    Value: !Ref NotificationEmail
+    
+  ScheduleName:
+    Description: Name of the EventBridge Schedule
+    Value: !Ref EventSchedule
+    
+  ScheduleArn:
+    Description: ARN of the EventBridge Schedule
+    Value: !GetAtt EventSchedule.Arn
+    
+  ConfirmSubscriptionNote:
+    Description: Important next step
+    Value: !Sub 'IMPORTANT: Check ${NotificationEmail} and confirm the SNS subscription to receive notifications!'
+    
+  TestFailureCommand:
+    Description: Command to simulate a failure and test the complete flow
+    Value: !Sub |
+      aws lambda update-function-configuration \
+        --function-name ${ScheduledFunction} \
+        --environment Variables={LOG_LEVEL=INFO,SIMULATE_FAILURE=true}
