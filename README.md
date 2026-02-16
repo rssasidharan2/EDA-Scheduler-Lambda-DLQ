@@ -389,19 +389,6 @@ This pattern is ideal for:
 - **Batch Operations**: Bulk updates, scheduled backups, data synchronization
 - **Mission-Critical Schedules**: Where both invocation and execution failures must be captured and alerted
 
-## Cost Optimization
-
-- **EventBridge Scheduler**: $1.00 per million invocations
-- **Lambda**: Pay per execution (free tier: 1M requests/month)
-- **SQS**: First 1M requests/month free, then $0.40 per million
-- **KMS**: $1/month per key + $0.03 per 10,000 requests
-- **CloudWatch Logs**: $0.50 per GB ingested
-- **SNS**: $0.50 per million notifications (first 1,000 free)
-
-For a schedule running every 5 minutes:
-- ~8,640 invocations/month
-- Estimated cost: ~$2-3/month (including KMS key)
-
 ## Troubleshooting
 
 ### No Email Notifications Received
